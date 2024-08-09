@@ -221,6 +221,8 @@ protected:
   bool action_name_should_be_checked_ = false;
   const std::chrono::milliseconds server_timeout_;
   const std::chrono::milliseconds wait_for_server_timeout_;
+  // timeout should be less than bt_loop_duration to be able to finish the current tick
+  const std::chrono::milliseconds max_timeout_ = std::chrono::milliseconds(100);
   std::string action_client_key_;
 
 private:
@@ -425,7 +427,7 @@ inline NodeStatus RosActionNode<T>::tick()
           }
           else
           {
-            RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
+            RCLCPP_INFO(logger(), "Goal accepted by server, waiting for result");
           }
         };
     //--------------------
@@ -449,22 +451,26 @@ inline NodeStatus RosActionNode<T>::tick()
     // FIRST case: check if the goal request has a timeout
     if(!goal_received_)
     {
-      auto nodelay = std::chrono::milliseconds(0);
-      auto timeout =
-          rclcpp::Duration::from_seconds(double(server_timeout_.count()) / 1000);
+      auto elapsed =
+          (now() - time_goal_sent_).template to_chrono<std::chrono::milliseconds>();
+      auto remaining = server_timeout_ - elapsed;
+
+      if(remaining <= std::chrono::milliseconds(0))
+      {
+        return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
+      }
+
+      // auto timeout =
+      //     rclcpp::Duration::from_seconds(double(server_timeout_.count()) / 1000);
+
+      auto timeout = remaining > max_timeout_ ? max_timeout_ : remaining;
 
       auto ret = client_instance_->callback_executor.spin_until_future_complete(
-          future_goal_handle_, nodelay);
+          future_goal_handle_, timeout);
+
       if(ret != rclcpp::FutureReturnCode::SUCCESS)
       {
-        if((now() - time_goal_sent_) > timeout)
-        {
-          return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
-        }
-        else
-        {
-          return NodeStatus::RUNNING;
-        }
+        return NodeStatus::RUNNING;
       }
       else
       {
