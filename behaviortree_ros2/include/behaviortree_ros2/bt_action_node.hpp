@@ -222,7 +222,7 @@ protected:
   const std::chrono::milliseconds server_timeout_;
   const std::chrono::milliseconds wait_for_server_timeout_;
   // timeout should be less than bt_loop_duration to be able to finish the current tick
-  const std::chrono::milliseconds max_timeout_ = std::chrono::milliseconds(100);
+  std::chrono::milliseconds max_timeout_;
   std::string action_client_key_;
 
 private:
@@ -265,6 +265,8 @@ inline RosActionNode<T>::RosActionNode(const std::string& instance_name,
   // - we use the action_name in the port and it is a static string.
   // - we use the action_name in the port and it is blackboard entry.
 
+  auto bt_period = std::chrono::milliseconds(200);  // TODO: Get value from BT
+  max_timeout_ = std::chrono::duration_cast<std::chrono::milliseconds>(bt_period * 0.5);
   // check port remapping
   auto portIt = config().input_ports.find("action_name");
   if(portIt != config().input_ports.end())
