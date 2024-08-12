@@ -221,7 +221,6 @@ protected:
   bool action_name_should_be_checked_ = false;
   const std::chrono::milliseconds server_timeout_;
   const std::chrono::milliseconds wait_for_server_timeout_;
-  // timeout should be less than bt_loop_duration to be able to finish the current tick
   std::chrono::milliseconds max_timeout_;
   std::string action_client_key_;
 
@@ -266,6 +265,7 @@ inline RosActionNode<T>::RosActionNode(const std::string& instance_name,
   // - we use the action_name in the port and it is blackboard entry.
 
   auto bt_period = std::chrono::milliseconds(10);  // TODO: Get value from BT
+  // timeout should be less than bt_loop_duration to be able to finish the current tick
   max_timeout_ = std::chrono::duration_cast<std::chrono::milliseconds>(bt_period * 0.5);
   // check port remapping
   auto portIt = config().input_ports.find("action_name");
@@ -429,7 +429,7 @@ inline NodeStatus RosActionNode<T>::tick()
           }
           else
           {
-            RCLCPP_INFO(logger(), "Goal accepted by server, waiting for result");
+            RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
           }
         };
     //--------------------
@@ -461,9 +461,6 @@ inline NodeStatus RosActionNode<T>::tick()
       {
         return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
       }
-
-      // auto timeout =
-      //     rclcpp::Duration::from_seconds(double(server_timeout_.count()) / 1000);
 
       auto timeout = remaining > max_timeout_ ? max_timeout_ : remaining;
 
