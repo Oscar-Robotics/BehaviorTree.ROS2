@@ -265,7 +265,7 @@ inline RosActionNode<T>::RosActionNode(const std::string& instance_name,
   // - we use the action_name in the port and it is a static string.
   // - we use the action_name in the port and it is blackboard entry.
 
-  auto bt_period = std::chrono::milliseconds(200);  // TODO: Get value from BT
+  auto bt_period = std::chrono::milliseconds(10);  // TODO: Get value from BT
   max_timeout_ = std::chrono::duration_cast<std::chrono::milliseconds>(bt_period * 0.5);
   // check port remapping
   auto portIt = config().input_ports.find("action_name");
