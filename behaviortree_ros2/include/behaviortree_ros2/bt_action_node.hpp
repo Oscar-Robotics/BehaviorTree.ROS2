@@ -171,6 +171,13 @@ public:
 
   NodeStatus sendGoal();
 
+  void goal_response_callback(typename GoalHandle::SharedPtr const future_handle);
+
+  void feedback_callback(typename GoalHandle::SharedPtr const goal_handle,
+                         const std::shared_ptr<const Feedback> feedback);
+
+  void result_callback(const WrappedResult& result);
+
   NodeStatus executeActionCallbacks();
 
   /// Can be used to change the name of the action programmatically
@@ -406,48 +413,18 @@ inline NodeStatus RosActionNode<T>::sendGoal()
   result_ = {};
 
   Goal goal;
-
   if(!setGoal(goal))
   {
     return CheckStatus(onFailure(INVALID_GOAL));
   }
 
   typename ActionClient::SendGoalOptions goal_options;
-
-  //--------------------
-  goal_options.feedback_callback =
-      [this](typename GoalHandle::SharedPtr,
-             const std::shared_ptr<const Feedback> feedback) {
-        on_feedback_state_change_ = onFeedback(feedback);
-        if(on_feedback_state_change_ == NodeStatus::IDLE)
-        {
-          throw std::logic_error("onFeedback must not return IDLE");
-        }
-        emitWakeUpSignal();
-      };
-  //--------------------
-  goal_options.result_callback = [this](const WrappedResult& result) {
-    if(goal_handle_->get_goal_id() == result.goal_id)
-    {
-      RCLCPP_DEBUG(logger(), "result_callback");
-      result_ = result;
-      emitWakeUpSignal();
-    }
-  };
-  //--------------------
   goal_options.goal_response_callback =
-      [this](typename GoalHandle::SharedPtr const future_handle) {
-        auto goal_handle_ = future_handle.get();
-        if(!goal_handle_)
-        {
-          RCLCPP_ERROR(logger(), "Goal was rejected by server");
-        }
-        else
-        {
-          RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
-        }
-      };
-  //--------------------
+      std::bind(&RosActionNode<T>::goal_response_callback, this, std::placeholders::_1);
+  goal_options.feedback_callback =
+      std::bind(&RosActionNode<T>::feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
+  goal_options.result_callback = std::bind(&RosActionNode<T>::result_callback, this, std::placeholders::_1);
+
   // Check if server is ready
   auto& action_client = client_instance_->action_client;
   if(!action_client->action_server_is_ready())
@@ -459,6 +436,43 @@ inline NodeStatus RosActionNode<T>::sendGoal()
   time_goal_sent_ = now();
 
   return NodeStatus::RUNNING;
+}
+
+template <class T>
+inline void RosActionNode<T>::goal_response_callback(typename GoalHandle::SharedPtr const future_handle)
+{
+  auto goal_handle_ = future_handle.get();
+  if(!goal_handle_)
+  {
+    RCLCPP_ERROR(logger(), "Goal was rejected by server");
+  }
+  else
+  {
+    RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
+  }
+}
+
+template <class T>
+inline void RosActionNode<T>::feedback_callback(
+    typename GoalHandle::SharedPtr const goal_handle, const std::shared_ptr<const Feedback> feedback)
+{
+  on_feedback_state_change_ = onFeedback(feedback);
+  if(on_feedback_state_change_ == NodeStatus::IDLE)
+  {
+    throw std::logic_error("onFeedback must not return IDLE");
+  }
+  emitWakeUpSignal();
+}
+
+template <class T>
+inline void RosActionNode<T>::result_callback(const WrappedResult& result)
+{
+  if(goal_handle_->get_goal_id() == result.goal_id)
+  {
+    RCLCPP_DEBUG(logger(), "result_callback");
+    result_ = result;
+    emitWakeUpSignal();
+  }
 }
 
 template <class T>
