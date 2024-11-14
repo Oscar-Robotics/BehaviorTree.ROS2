@@ -167,6 +167,12 @@ public:
 
   NodeStatus tick() override;
 
+  NodeStatus CheckStatus(NodeStatus status);
+
+  NodeStatus sendGoal();
+
+  NodeStatus executeActionCallbacks();
+
   /// Can be used to change the name of the action programmatically
   void setActionName(const std::string& action_name);
 
@@ -364,142 +370,157 @@ inline NodeStatus RosActionNode<T>::tick()
                            "in the ports");
   }
 
-  auto& action_client = client_instance_->action_client;
-
-  //------------------------------------------
-  auto CheckStatus = [](NodeStatus status) {
-    if(!isStatusCompleted(status))
-    {
-      throw LogicError("RosActionNode: the callback must return either SUCCESS nor "
-                       "FAILURE");
-    }
-    return status;
-  };
-
-  // first step to be done only at the beginning of the Action
-  if(status() == BT::NodeStatus::IDLE)
+  switch(status())
   {
-    setStatus(NodeStatus::RUNNING);
+    case NodeStatus::IDLE:
+      return sendGoal();
+      break;
+    case NodeStatus::RUNNING:
+      return executeActionCallbacks();
+      break;
+    default:
+      return NodeStatus::RUNNING;
+      break;
+  }
+}
 
-    goal_received_ = false;
-    future_goal_handle_ = {};
-    on_feedback_state_change_ = NodeStatus::RUNNING;
-    result_ = {};
+template <class T>
+inline NodeStatus RosActionNode<T>::CheckStatus(NodeStatus status)
+{
+  if(!isStatusCompleted(status))
+  {
+    throw LogicError("RosActionNode: the callback must return either SUCCESS nor "
+                     "FAILURE");
+  }
+  return status;
+}
 
-    Goal goal;
+template <class T>
+inline NodeStatus RosActionNode<T>::sendGoal()
+{
+  setStatus(NodeStatus::RUNNING);
 
-    if(!setGoal(goal))
-    {
-      return CheckStatus(onFailure(INVALID_GOAL));
-    }
+  goal_received_ = false;
+  future_goal_handle_ = {};
+  on_feedback_state_change_ = NodeStatus::RUNNING;
+  result_ = {};
 
-    typename ActionClient::SendGoalOptions goal_options;
+  Goal goal;
 
-    //--------------------
-    goal_options.feedback_callback =
-        [this](typename GoalHandle::SharedPtr,
-               const std::shared_ptr<const Feedback> feedback) {
-          on_feedback_state_change_ = onFeedback(feedback);
-          if(on_feedback_state_change_ == NodeStatus::IDLE)
-          {
-            throw std::logic_error("onFeedback must not return IDLE");
-          }
-          emitWakeUpSignal();
-        };
-    //--------------------
-    goal_options.result_callback = [this](const WrappedResult& result) {
-      if(goal_handle_->get_goal_id() == result.goal_id)
-      {
-        RCLCPP_DEBUG(logger(), "result_callback");
-        result_ = result;
-        emitWakeUpSignal();
-      }
-    };
-    //--------------------
-    goal_options.goal_response_callback =
-        [this](typename GoalHandle::SharedPtr const future_handle) {
-          auto goal_handle_ = future_handle.get();
-          if(!goal_handle_)
-          {
-            RCLCPP_ERROR(logger(), "Goal was rejected by server");
-          }
-          else
-          {
-            RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
-          }
-        };
-    //--------------------
-    // Check if server is ready
-    if(!action_client->action_server_is_ready())
-    {
-      return onFailure(SERVER_UNREACHABLE);
-    }
-
-    future_goal_handle_ = action_client->async_send_goal(goal, goal_options);
-    time_goal_sent_ = now();
-
-    return NodeStatus::RUNNING;
+  if(!setGoal(goal))
+  {
+    return CheckStatus(onFailure(INVALID_GOAL));
   }
 
-  if(status() == NodeStatus::RUNNING)
-  {
-    std::unique_lock<std::mutex> lock(getMutex());
-    client_instance_->callback_executor.spin_some();
+  typename ActionClient::SendGoalOptions goal_options;
 
-    // FIRST case: check if the goal request has a timeout
-    if(!goal_received_)
-    {
-      auto nodelay = std::chrono::milliseconds(0);
-      auto timeout =
-          rclcpp::Duration::from_seconds(double(server_timeout_.count()) / 1000);
-
-      auto ret = client_instance_->callback_executor.spin_until_future_complete(
-          future_goal_handle_, nodelay);
-      if(ret != rclcpp::FutureReturnCode::SUCCESS)
-      {
-        if((now() - time_goal_sent_) > timeout)
+  //--------------------
+  goal_options.feedback_callback =
+      [this](typename GoalHandle::SharedPtr,
+             const std::shared_ptr<const Feedback> feedback) {
+        on_feedback_state_change_ = onFeedback(feedback);
+        if(on_feedback_state_change_ == NodeStatus::IDLE)
         {
-          return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
+          throw std::logic_error("onFeedback must not return IDLE");
+        }
+        emitWakeUpSignal();
+      };
+  //--------------------
+  goal_options.result_callback = [this](const WrappedResult& result) {
+    if(goal_handle_->get_goal_id() == result.goal_id)
+    {
+      RCLCPP_DEBUG(logger(), "result_callback");
+      result_ = result;
+      emitWakeUpSignal();
+    }
+  };
+  //--------------------
+  goal_options.goal_response_callback =
+      [this](typename GoalHandle::SharedPtr const future_handle) {
+        auto goal_handle_ = future_handle.get();
+        if(!goal_handle_)
+        {
+          RCLCPP_ERROR(logger(), "Goal was rejected by server");
         }
         else
         {
-          return NodeStatus::RUNNING;
+          RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
         }
+      };
+  //--------------------
+  // Check if server is ready
+  auto& action_client = client_instance_->action_client;
+  if(!action_client->action_server_is_ready())
+  {
+    return CheckStatus(onFailure(SERVER_UNREACHABLE));
+  }
+
+  future_goal_handle_ = action_client->async_send_goal(goal, goal_options);
+  time_goal_sent_ = now();
+
+  return NodeStatus::RUNNING;
+}
+
+template <class T>
+inline NodeStatus
+RosActionNode<T>::executeActionCallbacks()
+{
+  std::unique_lock<std::mutex> lock(getMutex());
+  client_instance_->callback_executor.spin_some();
+
+  // FIRST case: check if the goal request has a timeout
+  if(!goal_received_)
+  {
+    auto nodelay = std::chrono::milliseconds(10);
+    auto timeout = rclcpp::Duration::from_seconds(double(server_timeout_.count()) / 1000);
+
+    auto ret = client_instance_->callback_executor.spin_until_future_complete(
+        future_goal_handle_, nodelay);
+    if(ret != rclcpp::FutureReturnCode::SUCCESS)
+    {
+      if((now() - time_goal_sent_) > timeout)
+      {
+        return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
       }
       else
       {
-        goal_received_ = true;
-        goal_handle_ = future_goal_handle_.get();
-        future_goal_handle_ = {};
-
-        if(!goal_handle_)
-        {
-          return CheckStatus(onFailure(GOAL_REJECTED_BY_SERVER));
-        }
+        return NodeStatus::RUNNING;
       }
     }
+    else
+    {
+      goal_received_ = true;
+      goal_handle_ = future_goal_handle_.get();
+      future_goal_handle_ = {};
 
-    // SECOND case: onFeedback requested a stop
-    if(on_feedback_state_change_ != NodeStatus::RUNNING)
-    {
-      cancelGoal();
-      return on_feedback_state_change_;
+      if(!goal_handle_)
+      {
+        return CheckStatus(onFailure(GOAL_REJECTED_BY_SERVER));
+      }
     }
-    // THIRD case: result received, requested a stop
-    if(result_.code != rclcpp_action::ResultCode::UNKNOWN)
+  }
+
+  // SECOND case: onFeedback requested a stop
+  if(on_feedback_state_change_ != NodeStatus::RUNNING)
+  {
+    cancelGoal();
+    return on_feedback_state_change_;
+  }
+
+  // THIRD case: result received, requested a stop
+  if(result_.code != rclcpp_action::ResultCode::UNKNOWN)
+  {
+    if(result_.code == rclcpp_action::ResultCode::ABORTED)
     {
-      if(result_.code == rclcpp_action::ResultCode::ABORTED)
-      {
-        return CheckStatus(onFailure(ACTION_ABORTED));
-      }
-      else if(result_.code == rclcpp_action::ResultCode::CANCELED)
-      {
-        return CheckStatus(onFailure(ACTION_CANCELLED));
-      }
-      else
-      {
-        return CheckStatus(onResultReceived(result_));
-      }
+      return CheckStatus(onFailure(ACTION_ABORTED));
+    }
+    else if(result_.code == rclcpp_action::ResultCode::CANCELED)
+    {
+      return CheckStatus(onFailure(ACTION_CANCELLED));
+    }
+    else
+    {
+      return CheckStatus(onResultReceived(result_));
     }
   }
   return NodeStatus::RUNNING;
