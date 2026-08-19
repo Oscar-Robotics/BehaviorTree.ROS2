@@ -422,8 +422,10 @@ inline NodeStatus RosActionNode<T>::sendGoal()
   goal_options.goal_response_callback =
       std::bind(&RosActionNode<T>::goal_response_callback, this, std::placeholders::_1);
   goal_options.feedback_callback =
-      std::bind(&RosActionNode<T>::feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
-  goal_options.result_callback = std::bind(&RosActionNode<T>::result_callback, this, std::placeholders::_1);
+      std::bind(&RosActionNode<T>::feedback_callback, this, std::placeholders::_1,
+                std::placeholders::_2);
+  goal_options.result_callback =
+      std::bind(&RosActionNode<T>::result_callback, this, std::placeholders::_1);
 
   // Check if server is ready
   auto& action_client = client_instance_->action_client;
@@ -439,7 +441,8 @@ inline NodeStatus RosActionNode<T>::sendGoal()
 }
 
 template <class T>
-inline void RosActionNode<T>::goal_response_callback(typename GoalHandle::SharedPtr const future_handle)
+inline void RosActionNode<T>::goal_response_callback(
+    typename GoalHandle::SharedPtr const future_handle)
 {
   auto goal_handle_ = future_handle.get();
   if(!goal_handle_)
@@ -453,8 +456,9 @@ inline void RosActionNode<T>::goal_response_callback(typename GoalHandle::Shared
 }
 
 template <class T>
-inline void RosActionNode<T>::feedback_callback(
-    typename GoalHandle::SharedPtr const goal_handle, const std::shared_ptr<const Feedback> feedback)
+inline void
+RosActionNode<T>::feedback_callback(typename GoalHandle::SharedPtr const goal_handle,
+                                    const std::shared_ptr<const Feedback> feedback)
 {
   on_feedback_state_change_ = onFeedback(feedback);
   if(on_feedback_state_change_ == NodeStatus::IDLE)
@@ -476,8 +480,7 @@ inline void RosActionNode<T>::result_callback(const WrappedResult& result)
 }
 
 template <class T>
-inline NodeStatus
-RosActionNode<T>::executeActionCallbacks()
+inline NodeStatus RosActionNode<T>::executeActionCallbacks()
 {
   std::unique_lock<std::mutex> lock(getMutex());
   client_instance_->callback_executor.spin_some();
@@ -553,50 +556,72 @@ inline void RosActionNode<T>::halt()
 template <class T>
 inline void RosActionNode<T>::cancelGoal()
 {
-  auto& executor = client_instance_->callback_executor;
-  if(!goal_handle_)
+  try
   {
-    if(future_goal_handle_.valid())
+    auto& executor = client_instance_->callback_executor;
+    if(!goal_handle_)
     {
-      // Here the discussion is if we should block or put a timer for the waiting
-      auto ret =
-          executor.spin_until_future_complete(future_goal_handle_, server_timeout_);
-      if(ret != rclcpp::FutureReturnCode::SUCCESS)
+      if(future_goal_handle_.valid())
       {
-        // In that case the goal was not accepted or timed out so probably we should do nothing.
-        return;
+        // Here the discussion is if we should block or put a timer for the waiting
+        auto ret =
+            executor.spin_until_future_complete(future_goal_handle_, server_timeout_);
+        if(ret != rclcpp::FutureReturnCode::SUCCESS)
+        {
+          // In that case the goal was not accepted or timed out so probably we should do nothing.
+          goal_handle_.reset();
+          future_goal_handle_ = {};
+          return;
+        }
+        else
+        {
+          goal_handle_ = future_goal_handle_.get();
+          future_goal_handle_ = {};
+          if(!goal_handle_)
+          {
+            // In that case the goal was not accepted
+            goal_handle_.reset();
+            return;
+          }
+        }
       }
       else
       {
-        goal_handle_ = future_goal_handle_.get();
+        RCLCPP_WARN(logger(), "cancelGoal called on an empty goal_handle");
+        goal_handle_.reset();
         future_goal_handle_ = {};
+        return;
       }
     }
-    else
+
+    auto& action_client = client_instance_->action_client;
+
+    auto future_result = action_client->async_get_result(goal_handle_);
+    auto future_cancel = action_client->async_cancel_goal(goal_handle_);
+
+    constexpr auto SUCCESS = rclcpp::FutureReturnCode::SUCCESS;
+
+    if(executor.spin_until_future_complete(future_cancel, server_timeout_) != SUCCESS)
     {
-      RCLCPP_WARN(logger(), "cancelGoal called on an empty goal_handle");
-      return;
+      RCLCPP_ERROR(logger(), "Failed to cancel action server for [%s]",
+                   action_name_.c_str());
+    }
+    if(executor.spin_until_future_complete(future_result, server_timeout_) != SUCCESS)
+    {
+      RCLCPP_ERROR(logger(), "Failed to get result call failed :( for [%s]",
+                   action_name_.c_str());
     }
   }
-
-  auto& action_client = client_instance_->action_client;
-
-  auto future_result = action_client->async_get_result(goal_handle_);
-  auto future_cancel = action_client->async_cancel_goal(goal_handle_);
-
-  constexpr auto SUCCESS = rclcpp::FutureReturnCode::SUCCESS;
-
-  if(executor.spin_until_future_complete(future_cancel, server_timeout_) != SUCCESS)
+  catch(const rclcpp_action::exceptions::UnknownGoalHandleError&)
   {
-    RCLCPP_ERROR(logger(), "Failed to cancel action server for [%s]",
-                 action_name_.c_str());
+    // Already completed/removed; halt is complete.
   }
-
-  if(executor.spin_until_future_complete(future_result, server_timeout_) != SUCCESS)
+  catch(const std::exception& ex)
   {
-    RCLCPP_ERROR(logger(), "Failed to get result call failed :( for [%s]",
-                 action_name_.c_str());
+    RCLCPP_WARN(logger(), "Navigation cancellation failed: %s", ex.what());
   }
+  goal_handle_.reset();
+  future_goal_handle_ = {};
 }
 
 }  // namespace BT
