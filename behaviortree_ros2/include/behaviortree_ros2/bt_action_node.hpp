@@ -444,14 +444,21 @@ template <class T>
 inline void RosActionNode<T>::goal_response_callback(
     typename GoalHandle::SharedPtr const future_handle)
 {
-  auto goal_handle_ = future_handle.get();
-  if(!goal_handle_)
+  if(!future_handle)
   {
     RCLCPP_ERROR(logger(), "Goal was rejected by server");
+    return;
   }
-  else
+  RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
+  // Store the handle now if it belongs to the goal in flight (rclcpp_action sets the
+  // goal future before calling this callback): its result can be delivered before
+  // executeActionCallbacks() reads the future, and result_callback needs the handle.
+  // A response for an older goal (e.g. after SEND_GOAL_TIMEOUT) is not stored.
+  if(future_goal_handle_.valid() &&
+     future_goal_handle_.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+     future_goal_handle_.get() == future_handle)
   {
-    RCLCPP_DEBUG(logger(), "Goal accepted by server, waiting for result");
+    goal_handle_ = future_handle;
   }
 }
 
@@ -471,12 +478,16 @@ RosActionNode<T>::feedback_callback(typename GoalHandle::SharedPtr const goal_ha
 template <class T>
 inline void RosActionNode<T>::result_callback(const WrappedResult& result)
 {
-  if(goal_handle_->get_goal_id() == result.goal_id)
+  // goal_handle_ is null after cancelGoal() or before the goal response: a late result
+  // of a cancelled or older goal is ignored instead of dereferencing it
+  if(!goal_handle_ || goal_handle_->get_goal_id() != result.goal_id)
   {
-    RCLCPP_DEBUG(logger(), "result_callback");
-    result_ = result;
-    emitWakeUpSignal();
+    RCLCPP_DEBUG(logger(), "Ignoring the result of a goal that is not the current one");
+    return;
   }
+  RCLCPP_DEBUG(logger(), "result_callback");
+  result_ = result;
+  emitWakeUpSignal();
 }
 
 template <class T>
